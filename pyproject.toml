@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orthex"
+version = "0.1.0"
+description = "Weight-level orthogonalization (abliteration) toolkit for HF causal LMs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Knovel Engineering" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers>=4.57",
+    "datasets",
+    "accelerate",
+    "pyyaml",
+    "numpy",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+orthex = "orthex.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["orthex*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,61 @@
+# Base config for orthex v1. This is the only config file -- to target a
+# different model, override fields from the command line via the generic
+# --set key.path=value flag (repeatable) rather than maintaining a separate
+# yaml per model, e.g.:
+#   orthex --config configs/default.yaml \
+#     --set model.id=google/gemma-2-2b-it --set model.architecture_adapter=gemma2
+model:
+  id: meta-llama/Llama-3.2-3B-Instruct
+  architecture_adapter: llama   # which family this model belongs to; used throughout the
+  # pipeline (capture/selection/ablation), not just export -- see docs/usage.md
+  backend: native_hf
+  dtype: bfloat16
+
+# All three sources are local files under data/ (see data/README.md for
+# provenance / how to regenerate) -- no network access or path outside this
+# repo needed at run time. Paths are relative to the working directory
+# orthex is invoked from (repo root), same convention as export.output_dir.
+data:
+  train:
+    positive:
+      provider: local_json
+      params: {id: data/harmful_behaviors_train.json, n_samples: 256}   # elicits the target behavior
+    negative:
+      provider: local_json
+      params: {id: data/harmless_alpaca_train.json, n_samples: 256}     # baseline prompts
+  test:
+    # Positive only: refusal_rate and perplexity are both measured on this
+    # same held-out behavior-eliciting prompt set, pre vs. post ablation.
+    provider: local_json
+    params: {id: data/harmbench_test.json, n_samples: 32}   # held-out, distinct from train
+
+capture:
+  sites: [resid_pre, resid_post]   # resid_mid is not supported (not a clean plain-nn.Module hook point)
+  position: -1
+
+directions:
+  strategy: mean_difference
+  layer_range: [1, -1]  # exclude embedding-adjacent layer 0
+
+selection:
+  strategy: refusal_phrase_heuristic
+  eval_top_n: 20
+  blacklist: []   # empty -> orthex.selection.scorers.refusal_phrase_heuristic.DEFAULT_BLACKLIST (15 phrases)
+  sites: [resid_pre]    # subset of capture.sites to search over
+  max_new_tokens: 32
+  generation_batch_size: 16
+
+ablation:
+  strategy: weight_orthogonalization
+  targets: [embed, attn_out, mlp_out]
+
+export:
+  push_to_hub: false
+  # repo_id: your-org/your-model-abliterated   # required if push_to_hub: true
+  # push_kwargs: {private: true}               # forwarded to model/tokenizer.push_to_hub()
+  output_dir: ./out
+
+evaluation:
+  refusal_rate: true
+  perplexity_delta: true
+  benchmark_subset: null   # unimplemented in v1

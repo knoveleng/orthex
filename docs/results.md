@@ -1,0 +1,28 @@
+# Results
+
+Measured refusal-removal results across the 6 models orthex has been validated against, and where to get each one. Positive set: `data/harmful_behaviors_train.json` (train) / `data/harmbench_test.json` (test, held out). Negative set: `data/harmless_alpaca_train.json` (train). `n_train=256`, `n_test=32`, `selection.eval_top_n=20`, auto-pick candidate selection except gemma-3-4b-it (forced, see below).
+
+| model | adapter | selected layer/site | refusal rate pre → post | perplexity pre → post | published |
+|---|---|---|---|---|---|
+| Llama-3.2-3B-Instruct | `llama` | 15/resid_pre | 0.78 → 0.19 | 18.49 → 21.78 (+3.29) | [knoveleng/Llama-3.2-3B-Instruct-Uncensored](https://huggingface.co/knoveleng/Llama-3.2-3B-Instruct-Uncensored) |
+| Qwen2.5-3B-Instruct | `qwen2` | 21/resid_pre | 0.78 → 0.00 | 14.66 → 36.53 (+21.88) | [knoveleng/Qwen2.5-3B-Instruct-Uncensored](https://huggingface.co/knoveleng/Qwen2.5-3B-Instruct-Uncensored) |
+| Qwen3-4B | `qwen3` | 23/resid_pre | 0.62 → 0.00 | 16.56 → 16.51 (−0.05) | [knoveleng/Qwen3-4B-Uncensored](https://huggingface.co/knoveleng/Qwen3-4B-Uncensored) |
+| Qwen3.5-4B | `qwen3_5` | 31/resid_pre | 0.97 → 0.00 | 11.21 → 11.25 (+0.04) | [knoveleng/Qwen3.5-4B-Uncensored](https://huggingface.co/knoveleng/Qwen3.5-4B-Uncensored) |
+| gemma-2-2b-it | `gemma2` | 13/resid_pre | 0.97 → 0.00 | 16.27 → 17.07 (+0.80) | [knoveleng/gemma-2-2b-it-uncensored](https://huggingface.co/knoveleng/gemma-2-2b-it-uncensored) |
+| gemma-3-4b-it | `gemma3` | 31/resid_pre (forced) | 0.56 → 0.00 | 19.95 → 18.64 (−1.31) | [knoveleng/gemma-3-4b-it-uncensored](https://huggingface.co/knoveleng/gemma-3-4b-it-uncensored) |
+
+Every model reaches complete refusal removal (→0.00) except Llama-3.2-3B-Instruct, which plateaus around 0.19 with the default hyperparameters (a larger `n_train`/`eval_top_n` or a different `layer_range` may push it further — not investigated). Each published repo carries its own model card with this same table (just its one row) plus a Responsible Use note — see `orthex/model_card.py`.
+
+## Methodology notes and fixes found along the way
+
+**Chat-template position mismatch (all models).** Activation capture originally tokenized raw dataset text directly; generation/scoring applied the model's chat template. This meant the direction was extracted at an unrelated position from where the model actually decides to refuse. Fixed by routing both capture and generation through the same `format_prompt()` helper (`orthex/generation.py`) — the "last token" position is always the one immediately before the model would start generating.
+
+**Thinking-mode default (Qwen3, Qwen3.5).** Qwen3/Qwen3.5's chat template defaults to opening an unclosed `<think>\n` block when `enable_thinking` isn't passed, meaning the fixed generation budget (`selection.max_new_tokens`, default 32) was being consumed entirely by reasoning preamble that never reached an actual answer — refusal scoring was measuring incomplete text. `format_prompt()` now passes `enable_thinking=False` unconditionally (harmless no-op on templates that don't define it). This changed Qwen3-4B's measured baseline refusal rate from an artifact 0.06 to a real 0.62, and Qwen3.5-4B's from 0.03 to 0.97.
+
+**gemma-3-4b-it layer selection.** The non-interactive auto-pick tie-breaks among equally-scoring candidates (by *activation-projection* refusal rate) toward the layer closest to the model's middle — a heuristic that doesn't account for the *weight-level* ablation's downstream perplexity cost. For gemma-3-4b-it this picked layer 17, which caused a 14x perplexity blowup (19.95 → 277.70) despite reaching 0% refusal. Layer 31 — also 0% refusal rate at selection time, ranked #1 by raw diff-of-means magnitude — turned out essentially free (19.95 → 18.64). Forced via `--set selection.force_layer=31 --set selection.force_site=resid_pre`. The weights themselves were checked directly (no NaN/Inf, ~2.7% relative change) to rule out a bug before concluding this was a selection-heuristic limitation, not a code defect. `selection_report.ranked` in every run's `evaluation_report.json` keeps every candidate considered, precisely so a bad auto-pick like this one can be reviewed and overridden.
+
+**Qwen3.5-4B architecture.** `Qwen/Qwen3.5-4B` is a multimodal checkpoint with a hybrid decoder: most layers use linear/SSM-style attention (`Qwen3_5GatedDeltaNet`, no `self_attn.o_proj`), only every 4th layer is standard full attention. `AutoModelForCausalLM.from_pretrained` resolves it to a text-only `Qwen3_5ForCausalLM` (ignoring the vision tower — "VLM compatibility" registration), giving a flat `model.model.embed_tokens`/`model.model.layers[i]` structure. The `qwen3_5` adapter branches per layer on `hasattr(layer, "self_attn")` vs. `hasattr(layer, "linear_attn")`, treating `linear_attn.out_proj` as the residual-stream-writing module for linear-attention layers (same role, same orientation, as `self_attn.o_proj`). Requires `transformers>=5.x` — the `qwen3_5` model type isn't registered in 4.57.
+
+## Reproducing these numbers
+
+These numbers were computed before several config/plumbing changes: the `data.test` positive-only restructure, the `train`/`test` + `provider`/`params` config shape, `configs/models/*.yaml` → CLI-flag consolidation, and moving the prompt sets from remote HF datasets / an external path into `data/`. None of that changed the ablation math or the underlying prompt content — `data/*.json` are exact mirrors of what was fetched remotely at the time — so a fresh run under the current `configs/default.yaml` should reproduce this table. If it doesn't, something regressed; re-run via `scripts/run_all_models.sh` (or `scripts/push_existing_models.py` afterward, if you also want to re-publish) and compare.
